@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+    tags:
+      - 'wayland/v**'
+
+jobs:
+  linux:
+    name: Wayland
+    runs-on: ubuntu-20.04
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v2
+
+      # TODO: rename azure-pipelines/linux/xvfb.init to github-actions
+      - name: Setup Build Environment
+        run: |
+          sudo apt-get update
+      - uses: actions/setup-node@v2
+        with:
+          node-version: 12
+
+      - name: Cache node modules
+        id: cacheNodeModules
+        uses: actions/cache@v2
+        with:
+          path: "**/node_modules"
+          key: ${{ runner.os }}-cacheNodeModules7-${{ hashFiles('.yarnrc', 'remote/.yarnrc', '**/yarn.lock', '!**/node_modules/**/yarn.lock', '!**/.*/**/yarn.lock') }}
+          restore-keys: ${{ runner.os }}-cacheNodeModules7-
+      - name: Get yarn cache directory path
+        id: yarnCacheDirPath
+        if: ${{ steps.cacheNodeModules.outputs.cache-hit != 'true' }}
+        run: echo "::set-output name=dir::$(yarn cache dir)"
+      - name: Cache yarn directory
+        if: ${{ steps.cacheNodeModules.outputs.cache-hit != 'true' }}
+        uses: actions/cache@v2
+        with:
+          path: ${{ steps.yarnCacheDirPath.outputs.dir }}
+          key: ${{ runner.os }}-yarnCacheDir-${{ hashFiles('.yarnrc', 'remote/.yarnrc', '**/yarn.lock', '!**/node_modules/**/yarn.lock', '!**/.*/**/yarn.lock') }}
+          restore-keys: ${{ runner.os }}-yarnCacheDir-
+      - name: Execute yarn
+        if: ${{ steps.cacheNodeModules.outputs.cache-hit != 'true' }}
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+        run: yarn --frozen-lockfile --network-timeout 180000
+      - name: Run postinstall scripts
+        if: ${{ steps.cacheNodeModules.outputs.cache-hit == 'true' }}
+        run: yarn postinstall
+
+      - name: Compile and build
+        run: |
+          yarn gulp compile-build
+          yarn gulp compile-extensions-build
+          yarn gulp minify-vscode
+          yarn gulp vscode-linux-x64-min-ci
+          yarn gulp vscode-linux-x64-build-deb
+          yarn gulp vscode-linux-x64-build-rpm
+
+      - name: Prepare artifacts
+        id: artifacts
+        run: |
+          version=$(echo ${{ github.ref }} | cut -d 'v' -f 2)
+
+          mkdir .build/linux/artifacts
+          tar -czvf .build/linux/artifacts/code-oss-wayland_$version-x64.tar.gz ../VSCode-linux-x64/
+          cp .build/linux/deb/amd64/deb/*.deb .build/linux/artifacts/
+          cp .build/linux/rpm/x86_64/*.rpm .build/linux/artifacts/
+
+          echo "::set-output name=gzip::$(find .build/linux/artifacts/*.tar.gz -exec basename {} \;)"
+          echo "::set-output name=deb::$(find .build/linux/artifacts/*.deb -exec basename {} \;)"
+          echo "::set-output name=rpm::$(find .build/linux/artifacts/*.rpm -exec basename {} \;)"
+
+      - name: Upload gzip artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: ${{steps.artifacts.outputs.gzip}}
+          path: .build/linux/artifacts/${{steps.artifacts.outputs.gzip}}
+
+      - name: Upload deb artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: ${{steps.artifacts.outputs.deb}}
+          path: .build/linux/artifacts/${{steps.artifacts.outputs.deb}}
+
+      - name: Upload rpm artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: ${{steps.artifacts.outputs.rpm}}
+          path: .build/linux/artifacts/${{steps.artifacts.outputs.rpm}}
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref }}
+          draft: false
+          prerelease: false
+
+      - name: Upload Release Asset (gzip)
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: .build/linux/artifacts/${{steps.artifacts.outputs.gzip}}
+          asset_name: ${{steps.artifacts.outputs.gzip}}
+          asset_content_type: application/gzip
+
+      - name: Upload Release Asset (deb)
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: .build/linux/artifacts/${{steps.artifacts.outputs.deb}}
+          asset_name: ${{steps.artifacts.outputs.deb}}
+          asset_content_type: application/vnd.debian.binary-package
+
+      - name: Upload Release Asset (rpm)
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: .build/linux/artifacts/${{steps.artifacts.outputs.rpm}}
+          asset_name: ${{steps.artifacts.outputs.rpm}}
+          asset_content_type: application/x-rpm
